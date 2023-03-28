@@ -1,0 +1,303 @@
+/**
+	////// OLD CODE
+	// modify node.c so that TCP packets are sent here
+	command void TCP.handle_packet(pack in_pack) {
+		
+		pack temp_pack;
+		TCPpacket content;
+		uint8_t i = 0;
+		socket_store_t* active_socket;
+
+
+		if (in_pack.dest != TOS_NODE_ID) {
+			call IP.send(in_pack, in_pack.dest);
+			return;
+		}
+		content = *(TCPpacket*)in_pack.payload;
+		if (cli) { // client
+			if (content.flag == SYNACK) {
+				root_socket.state = ESTABLISHED;
+				root_socket.effectiveWindow = content.advwin;
+				root_socket.lastAck = content.ack;
+				root_socket.lastRcvd = content.seq;
+
+				// Sending the ACK
+				tcp_pack.src = TOS_NODE_ID;
+				tcp_pack.dest = root_socket.dest.addr;
+				tcp_pack.srcp = root_socket.src;
+				tcp_pack.destp = root_socket.dest.port;
+				tcp_pack.seq = root_socket.lastSent + 1;
+				tcp_pack.ack = root_socket.lastRcvd + 1;
+				tcp_pack.flag = ACK;
+				tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+				makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+				call IP.send(to_send, tcp_pack.dest);
+				root_socket.lastSent ++;
+				dbg(TRANSPORT_CHANNEL, "SYNACK recived from %hhu\n", tcp_pack.dest);
+				return;
+			} else if (content.flag == ACK && root_socket.state == FIN_WAIT_1) {
+				dbg(TRANSPORT_CHANNEL, "FIN ACK from %hhu\n", content.src);
+				root_socket.state = FIN_WAIT_2;
+			} else if (content.flag == FIN && root_socket.state == FIN_WAIT_2) {
+				dbg(TRANSPORT_CHANNEL, "FIN from %hhu\n", content.src);
+				root_socket.state = TIME_WAIT;
+				tcp_pack.src = TOS_NODE_ID;
+				tcp_pack.dest = root_socket.dest.addr;
+				tcp_pack.srcp = root_socket.src;
+				tcp_pack.destp = root_socket.dest.port;
+				tcp_pack.seq = root_socket.lastSent + 1;
+				tcp_pack.ack = root_socket.lastRcvd + 1;
+				tcp_pack.flag = ACK;
+				tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+				makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+				call IP.send(to_send, tcp_pack.dest);
+
+			}// else if (content.flag == ACK && root_socket.state == ESTABLISHED) {
+			//	root_socket.lastAck = content.ack;
+			//	root_socket.lastRcvd = content.seq;
+			//}
+		} else { // server
+			if (content.flag == SYN) { // connection is being attempted
+				active_socket = &sockets[num_cli];
+				num_cli ++;
+				active_socket->dest.port = content.srcp;
+				active_socket->dest.addr = content.src;
+				active_socket->state = SYN_RCVD;
+				active_socket->src = root_socket.src;
+				active_socket->flag = 0; // 0 for server, 1 for cli
+
+				active_socket->lastWritten = 0;
+				active_socket->lastAck = 1; 
+				active_socket->lastSent = 0;
+
+				active_socket->lastRead = 0;
+				active_socket->lastRcvd = content.seq;
+				active_socket->nextExpected = 0;
+				active_socket->effectiveWindow = content.advwin;
+				
+				active_socket->lastSent ++;
+
+				tcp_pack.src = TOS_NODE_ID;
+				tcp_pack.dest = active_socket->dest.addr;
+				tcp_pack.srcp = active_socket->src;
+				tcp_pack.destp = active_socket->dest.port;
+				tcp_pack.seq = active_socket->lastSent;
+				tcp_pack.ack = active_socket->lastRcvd + 1;
+				tcp_pack.flag = SYNACK;
+				tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+				makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+				call IP.send(to_send, tcp_pack.dest);
+				
+				dbg(TRANSPORT_CHANNEL, "Connection attempted by %hhu, sending SYNACK\n", tcp_pack.dest);
+
+				return;
+			}
+			for (i = 0; i < num_cli; i ++) {
+				if (content.src == sockets[i].dest.addr && content.srcp == sockets[i].dest.port) {
+					active_socket = &sockets[i];
+					break;
+				}
+			}
+			if (active_socket == 0) {
+				dbg(TRANSPORT_CHANNEL, "Information from irrelevant node recieved!");
+				return;
+			}
+			if (content.flag == DATA /*&& content.seq > active_socket -> lastRcvd*/) {
+				for(i = 0; i < 6; i++) {
+					dbg(TRANSPORT_CHANNEL, "Reading Data: %hu\n", ((uint16_t*)content.payload)[i]);
+				}
+				dbg(TRANSPORT_CHANNEL, "\n");
+				// send ACK
+				return;
+				active_socket ++;
+				tcp_pack.src = TOS_NODE_ID;
+				tcp_pack.dest = active_socket->dest.addr;
+				tcp_pack.srcp = active_socket->src;
+				tcp_pack.destp = active_socket->dest.port;
+				tcp_pack.seq = active_socket->lastSent;
+				tcp_pack.ack = active_socket->lastRcvd + 1;
+				tcp_pack.flag = ACK;
+				tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+				makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+				call IP.send(to_send, tcp_pack.dest);
+
+			} else if (active_socket -> state == SYN_RCVD && content.flag == ACK){
+				dbg(TRANSPORT_CHANNEL, "CONNECTION ESTABLISHED WITH NODE %hhu, HANDSHAKE COMPLETE\n", content.src); 
+				active_socket -> state = ESTABLISHED;
+				active_socket -> lastRcvd = content.seq;
+				active_socket -> lastAck = content.ack;
+				//dbg(TRANSPORT_CHANNEL, "HANDSHAKE COMPLETE\n", active_socket->dest.addr);
+			} else if (content.flag == FIN) {
+				// send ACK
+				dbg(TRANSPORT_CHANNEL, "FIN RECIEVED FROM %hhu\n", active_socket->dest.addr);
+				active_socket -> state = CLOSE_WAIT;
+				active_socket->lastSent ++;
+				tcp_pack.src = TOS_NODE_ID;
+				tcp_pack.dest = active_socket->dest.addr;
+				tcp_pack.srcp = active_socket->src;
+				tcp_pack.destp = active_socket->dest.port;
+				tcp_pack.seq = active_socket->lastSent;
+				tcp_pack.ack = active_socket->lastRcvd + 1;
+				tcp_pack.flag = ACK;
+				tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+				makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+				call IP.send(to_send, tcp_pack.dest);
+			} else if (content.flag == ACK && active_socket -> state == LAST_ACK) {
+				active_socket -> state == CLOSED;
+			}
+		}
+	}
+
+	/// cmd issued (serv)
+	/// Starts the server
+	command void TCP.init_server(uint8_t port) {
+		// creates the server
+		//root_socket = socket_store_t();
+		root_socket.state = LISTEN;
+		root_socket.src = port;
+		root_socket.flag = 0; // 0 for server, 1 for cli
+
+		root_socket.lastWritten = 0;
+		root_socket.lastAck = 1; 
+		root_socket.lastSent = 0;
+
+		root_socket.lastRead = 0;
+		root_socket.lastRcvd = 0;
+		root_socket.nextExpected = 0;
+
+		// addr is blank, this socket does not handle connections
+		call Timer.startPeriodic(1000); // handles data from this
+		cli = 0;
+		dbg(TRANSPORT_CHANNEL, "SERVER STARTED ON PORT %hhu\n", port);
+	}
+
+	/// cmd issued (cli)
+	/// Starts the client (node can only have client or server currently)
+	command void TCP.init_cli(uint8_t dest, uint8_t srcp, uint8_t destp, uint16_t transfer) {
+		
+		uint8_t expected_node_latency = 10000; // latency between two connected nodes, milliseconds
+		uint16_t RTT = expected_node_latency * 2;// * call IP.getCost(dest);
+		socket_addr_t addr;
+		root_socket.src = srcp;
+		addr.port = destp;
+		addr.addr = dest;
+		root_socket.dest = addr;
+		root_socket.RTT = RTT;
+		root_socket.flag = 1; // use the sender portion
+		root_socket.state = SYN_SENT;
+
+		root_socket.lastWritten = 0; // am going to use this for buffer purposes
+		root_socket.lastAck = 1; 
+		root_socket.lastSent = 0;
+
+		root_socket.lastRead = 0;
+		root_socket.lastRcvd = 0;
+		root_socket.nextExpected = 0;
+
+		/// try to connect to the server using the socket information
+		// create the packet
+		tcp_pack.src = TOS_NODE_ID;
+		tcp_pack.dest = dest;
+		tcp_pack.srcp = srcp;
+		tcp_pack.destp = destp;
+		tcp_pack.seq = root_socket.lastSent + 1;
+		tcp_pack.ack = 0;
+		tcp_pack.flag = SYN;
+		tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+		makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, 4, tcp_pack.seq, (uint8_t*)&tcp_pack, 20);
+		call IP.send(to_send, dest);
+		root_socket.lastSent ++;
+		call Timer.startPeriodic(10000);
+		cli = 1;
+		data_sent = 0;
+		data_tosend = transfer;
+		dbg(TRANSPORT_CHANNEL, "CLIENT ON PORT %hhu ATTEMTING CONNECTION TO NODE %hhu:PORT %hhu\n", srcp, dest, destp);	
+	}
+
+
+	// timer fired
+	event void Timer.fired() {
+		uint8_t i;
+		uint16_t data[6];
+		if (cli) { // Client
+			//if (root_socket.lastAck < root_socket.lastSent) { // we need to resend the packet
+			//	call IP.send(to_send, to_send.dest); // currently packet is not changed between this
+			//} else { // normal client operation
+				//dbg(TRANSPORT_CHANNEL, "CLIENT SENDING %hhu\n", data_sent);
+				if (data_sent != data_tosend || root_socket.state == FIN_WAIT_2 || root_socket.state == TIME_WAIT) {
+					switch (root_socket.state) {
+					case SYN_SENT: // havent heard back yet, don't do anything.
+						break;
+					case ESTABLISHED: // connection established, send information
+						/// data transfer is going to be pretty basic right now.
+						//dbg(TRANSPORT_CHANNEL, "CLIENT SENDING\n");
+						for (i = 0; i < 6 && data_sent < data_tosend; i ++) { // gets the data to be sent
+							data_sent++;
+							data[i] = data_sent;
+						}
+						// sends the data
+						tcp_pack.src = TOS_NODE_ID;
+						tcp_pack.dest = root_socket.dest.addr;
+						tcp_pack.srcp = root_socket.src;
+						tcp_pack.destp = root_socket.dest.port;
+						tcp_pack.seq = root_socket.lastSent + 1;
+						tcp_pack.ack = root_socket.lastRcvd + 1;
+						tcp_pack.flag = DATA;
+						tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+						memcpy(tcp_pack.payload, (uint8_t*)data, MAX_TCP_PAYLOAD_SIZE);
+						makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+						call IP.send(to_send, tcp_pack.dest);
+						break;
+					case TIME_WAIT:
+						root_socket.state = CLOSED;
+						dbg(TRANSPORT_CHANNEL, "CLIENT TERMINATED\n");
+						call Timer.stop();
+						break;
+					}
+				} else if (data_sent == data_tosend && root_socket.state != FIN_WAIT_2) {
+					//dbg(TRANSPORT_CHANNEL, "%hhu, %hhu\n", data_sent, data_tosend);
+					close();
+				}
+			//}
+		} else {   // Server
+			for (i = 0; i < num_cli; i++) {
+				if (sockets[i].state == CLOSE_WAIT) {
+					sockets[i].state = LAST_ACK;
+					tcp_pack.src = TOS_NODE_ID;
+					tcp_pack.dest = sockets[i].dest.addr;
+					tcp_pack.srcp = sockets[i].src;
+					tcp_pack.destp = sockets[i].dest.port;
+					tcp_pack.seq = sockets[i].lastSent + 1;
+					tcp_pack.ack = sockets[i].lastRcvd + 1;
+					tcp_pack.flag = FIN;
+					tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+					memcpy(tcp_pack.payload, (uint8_t*)data, MAX_TCP_PAYLOAD_SIZE);
+					makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+					call IP.send(to_send, tcp_pack.dest);
+				}
+			}
+
+			
+			return;
+			if (root_socket.lastAck <= root_socket.lastSent) { // we need to resend the packet
+				call IP.send(to_send, to_send.dest); // currently packet is not changed between this
+			} 
+		}
+	}
+
+	void close() { // begins Teardown
+		dbg(TRANSPORT_CHANNEL, "TERMINATING CONNECTION\n");
+
+		root_socket.state = FIN_WAIT_1;
+		tcp_pack.src = TOS_NODE_ID;
+		tcp_pack.dest = root_socket.dest.addr;
+		tcp_pack.srcp = root_socket.src;
+		tcp_pack.destp = root_socket.dest.port;
+		tcp_pack.seq = root_socket.lastSent + 1;
+		tcp_pack.ack = root_socket.lastRcvd + 1;
+		tcp_pack.flag = FIN;
+		tcp_pack.advwin = SOCKET_BUFFER_SIZE;
+		makePack(&to_send, TOS_NODE_ID, tcp_pack.dest, MAX_TTL, PROTOCOL_TCP, 0, (uint8_t*)&tcp_pack, 20);
+		call IP.send(to_send, tcp_pack.dest);
+	}
+	**/
